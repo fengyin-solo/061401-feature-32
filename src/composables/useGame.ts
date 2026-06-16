@@ -1,5 +1,5 @@
-import { ref, computed, watch } from 'vue'
-import type { GameState, LogEntry, RandomEvent, ActionType, ActionEffect } from '@/types/game'
+import { ref, computed } from 'vue'
+import type { GameState, LogEntry, RandomEvent, ActionType, ActionEffect, TurnRecord, StatsSnapshot, GameOverSummary, TurningPoint, FatalChain, ResourcePath } from '@/types/game'
 import { randomEvents } from '@/data/events'
 
 const STORAGE_KEY_HIGH_SCORE = 'survival_game_high_score'
@@ -23,6 +23,16 @@ const actionNames: Record<ActionType, string> = {
   drink: '喝水',
 }
 
+function takeSnapshot(state: GameState): StatsSnapshot {
+  return {
+    health: state.health,
+    hunger: state.hunger,
+    thirst: state.thirst,
+    wood: state.wood,
+    stone: state.stone,
+  }
+}
+
 export function useGame() {
   const state = ref<GameState>({
     health: 80,
@@ -33,12 +43,107 @@ export function useGame() {
     turn: 0,
     isGameOver: false,
     logs: [],
+    turnHistory: [],
   })
 
   const highScore = ref<number>(0)
   let logIdCounter = 0
 
   const canAct = computed(() => !state.value.isGameOver)
+
+  const gameOverSummary = computed<GameOverSummary>(() => {
+    const history = state.value.turnHistory
+    if (history.length === 0) {
+      return { turningPoints: [], lastActions: [], fatalChains: [], resourcePath: [], deathCause: '' }
+    }
+
+    const turningPoints = computeTurningPoints(history)
+    const lastActions = history.slice(-3)
+    const fatalChains = computeFatalChains(history)
+    const resourcePath = computeResourcePath(history)
+    const deathCause = computeDeathCause(state.value)
+
+    return { turningPoints, lastActions, fatalChains, resourcePath, deathCause }
+  })
+
+  function computeTurningPoints(history: TurnRecord[]): TurningPoint[] {
+    const points: TurningPoint[] = []
+    for (const record of history) {
+      if (!record.event || record.event.type !== 'bad') continue
+      const healthDelta = record.statsAfter.health - record.statsBefore.health
+      const hungerDelta = record.statsAfter.hunger - record.statsBefore.hunger
+      const thirstDelta = record.statsAfter.thirst - record.statsBefore.thirst
+      const severity: TurningPoint['severity'] =
+        healthDelta <= -20 || hungerDelta >= 20 || thirstDelta >= 20
+          ? 'critical'
+          : healthDelta <= -10 || hungerDelta >= 10 || thirstDelta >= 10
+            ? 'major'
+            : 'minor'
+      const parts: string[] = [record.event.text]
+      if (healthDelta !== 0) parts.push(`生命${healthDelta > 0 ? '+' : ''}${healthDelta}`)
+      if (hungerDelta !== 0) parts.push(`饥饿${hungerDelta > 0 ? '+' : ''}${hungerDelta}`)
+      if (thirstDelta !== 0) parts.push(`口渴${thirstDelta > 0 ? '+' : ''}${thirstDelta}`)
+      points.push({ turn: record.turn, description: parts.join('，'), severity })
+    }
+    return points
+  }
+
+  function computeFatalChains(history: TurnRecord[]): FatalChain[] {
+    const chains: FatalChain[] = []
+    let currentEvents: string[] = []
+    let currentStart = 0
+    let currentHealthLoss = 0
+
+    for (const record of history) {
+      const isBad = record.event && record.event.type === 'bad'
+      const healthLoss = record.statsBefore.health - record.statsAfter.health
+      if (isBad && healthLoss > 0) {
+        if (currentEvents.length === 0) currentStart = record.turn
+        currentEvents.push(record.event!.text)
+        currentHealthLoss += healthLoss
+      } else {
+        if (currentEvents.length >= 2) {
+          chains.push({
+            startTurn: currentStart,
+            endTurn: record.turn - 1,
+            events: [...currentEvents],
+            totalHealthLoss: currentHealthLoss,
+          })
+        }
+        currentEvents = []
+        currentHealthLoss = 0
+      }
+    }
+    if (currentEvents.length >= 2) {
+      chains.push({
+        startTurn: currentStart,
+        endTurn: history[history.length - 1].turn,
+        events: [...currentEvents],
+        totalHealthLoss: currentHealthLoss,
+      })
+    }
+    return chains
+  }
+
+  function computeResourcePath(history: TurnRecord[]): ResourcePath[] {
+    return history.map((r) => ({
+      turn: r.turn,
+      action: r.actionName,
+      health: r.statsAfter.health,
+      hunger: r.statsAfter.hunger,
+      thirst: r.statsAfter.thirst,
+      wood: r.statsAfter.wood,
+      stone: r.statsAfter.stone,
+    }))
+  }
+
+  function computeDeathCause(s: GameState): string {
+    const causes: string[] = []
+    if (s.health <= 0) causes.push('生命值归零')
+    if (s.hunger >= MAX_STAT) causes.push('饥饿值满格')
+    if (s.thirst >= MAX_STAT) causes.push('口渴值满格')
+    return causes.join(' + ') || '未知原因'
+  }
 
   function loadHighScore() {
     try {
@@ -124,6 +229,7 @@ export function useGame() {
   function performAction(action: ActionType) {
     if (!canPerformAction(action)) return
 
+    const statsBefore = takeSnapshot(state.value)
     const effects = actionEffects[action]
     applyEffects(effects)
     state.value.turn++
@@ -135,6 +241,18 @@ export function useGame() {
 
     const eventLogType = event.type === 'good' ? 'good' : event.type === 'bad' ? 'bad' : 'event'
     addLog(event.text, eventLogType)
+
+    const statsAfter = takeSnapshot(state.value)
+
+    state.value.turnHistory.push({
+      turn: state.value.turn,
+      action,
+      actionName: actionNames[action],
+      statsBefore,
+      statsAfter,
+      event: { ...event },
+      actionEffects: { ...effects },
+    })
 
     checkGameOver()
   }
@@ -165,6 +283,7 @@ export function useGame() {
       turn: 0,
       isGameOver: false,
       logs: [],
+      turnHistory: [],
     }
     logIdCounter = 0
     addLog('你醒来发现自己身处荒野中，需要想办法生存下去...', 'system')
@@ -178,6 +297,7 @@ export function useGame() {
     highScore,
     canAct,
     canPerformAction,
+    gameOverSummary,
     gatherWood,
     gatherStone,
     hunt,

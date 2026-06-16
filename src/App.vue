@@ -6,7 +6,7 @@ import EventLog from '@/components/EventLog.vue'
 import GameOverModal from '@/components/GameOverModal.vue'
 import { useGame } from '@/composables/useGame'
 
-const { state, highScore, canPerformAction, gatherWood, gatherStone, hunt, drink, restart } = useGame()
+const { state, highScore, canPerformAction, gameOverSummary, gatherWood, gatherStone, hunt, drink, restart } = useGame()
 
 const isNewRecord = computed(() => state.value.turn >= highScore.value && state.value.turn > 0)
 </script>
@@ -77,6 +77,7 @@ const isNewRecord = computed(() => state.value.turn >= highScore.value && state.
       :final-turn="state.turn"
       :high-score="highScore"
       :is-new-record="isNewRecord"
+      :summary="gameOverSummary"
       @restart="restart"
     />
   </div>
